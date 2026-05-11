@@ -34,7 +34,7 @@ import { ReadFileTool } from '../tools/read-file.js';
 import { ReadMcpResourceTool } from '../tools/read-mcp-resource.js';
 import { ListMcpResourcesTool } from '../tools/list-mcp-resources.js';
 import { GrepTool } from '../tools/grep.js';
-import { canUseRipgrep, RipGrepTool } from '../tools/ripGrep.js';
+import { RipGrepTool } from '../tools/ripGrep.js';
 import { GlobTool } from '../tools/glob.js';
 import { ActivateSkillTool } from '../tools/activate-skill.js';
 import { EditTool } from '../tools/edit.js';
@@ -99,6 +99,7 @@ import {
   StandardFileSystemService,
   type FileSystemService,
 } from '../services/fileSystemService.js';
+import { RipgrepService } from '../tools/ripgrepService.js';
 import {
   TrackerCreateTaskTool,
   TrackerUpdateTaskTool,
@@ -747,6 +748,7 @@ export interface ConfigParameters {
 }
 
 export class Config implements McpContext, AgentLoopContext {
+  readonly ripgrepService: RipgrepService;
   private _toolRegistry!: ToolRegistry;
   private mcpClientManager?: McpClientManager;
   private readonly a2aClientManager?: A2AClientManager;
@@ -1007,6 +1009,7 @@ export class Config implements McpContext, AgentLoopContext {
         };
 
     this.targetDir = path.resolve(params.targetDir);
+    this.ripgrepService = new RipgrepService(this.targetDir);
     this.folderTrust = params.folderTrust ?? false;
     this.workspaceContext = new WorkspaceContext(this.targetDir, []);
     this.pendingIncludeDirectories = params.includeDirectories ?? [];
@@ -3805,7 +3808,7 @@ export class Config implements McpContext, AgentLoopContext {
       let useRipgrep = false;
       let errorString: undefined | string = undefined;
       try {
-        useRipgrep = await canUseRipgrep();
+        useRipgrep = await this.ripgrepService.canUseRipgrep();
       } catch (error: unknown) {
         errorString = String(error);
       }

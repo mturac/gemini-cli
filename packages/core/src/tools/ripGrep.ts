@@ -8,8 +8,6 @@ import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
-import { fileURLToPath } from 'node:url';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -22,7 +20,6 @@ import { ToolErrorType } from './tool-error.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
-import { fileExists } from '../utils/fileUtils.js';
 import { GREP_TOOL_NAME } from './tool-names.js';
 import { debugLogger } from '../utils/debugLogger.js';
 import {
@@ -30,7 +27,7 @@ import {
   COMMON_DIRECTORY_EXCLUDES,
 } from '../utils/ignorePatterns.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import { execStreaming, resolveExecutable } from '../utils/shell-utils.js';
+import { execStreaming } from '../utils/shell-utils.js';
 import {
   DEFAULT_TOTAL_MAX_MATCHES,
   DEFAULT_SEARCH_TIMEOUT_MS,
@@ -38,73 +35,6 @@ import {
 import { RIP_GREP_DEFINITION } from './definitions/coreTools.js';
 import { resolveToolDeclaration } from './definitions/resolver.js';
 import { type GrepMatch, formatGrepResults } from './grep-utils.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-let cachedRgPath: string | null | undefined = undefined;
-
-/**
- * For testing purposes only.
- * @internal
- */
-export function __resetRipgrepPathCache(): void {
-  cachedRgPath = undefined;
-}
-
-export async function getRipgrepPath(): Promise<string | null> {
-  if (cachedRgPath !== undefined) {
-    return cachedRgPath;
-  }
-
-  const platform = os.platform();
-  const arch = os.arch();
-
-  // Map to the correct bundled binary
-  const binName = `rg-${platform}-${arch}${platform === 'win32' ? '.exe' : ''}`;
-
-  const candidatePaths = [
-    // 1. SEA runtime layout: everything is flattened into the root dir
-    path.resolve(__dirname, 'vendor/ripgrep', binName),
-    // 2. Dev/Dist layout: packages/core/dist/tools/ripGrep.js -> packages/core/vendor/ripgrep
-    path.resolve(__dirname, '../../vendor/ripgrep', binName),
-  ];
-
-  for (const candidate of candidatePaths) {
-    if (await fileExists(candidate)) {
-      cachedRgPath = candidate;
-      return candidate;
-    }
-  }
-
-  // 3. Fallback: check system PATH
-  const systemRg = await resolveExecutable('rg');
-  if (systemRg) {
-    cachedRgPath = 'rg';
-    return 'rg';
-  }
-
-  cachedRgPath = null;
-  return null;
-}
-
-/**
- * Checks if `rg` exists in the bundled vendor directory.
- */
-export async function canUseRipgrep(): Promise<boolean> {
-  const binPath = await getRipgrepPath();
-  return binPath !== null;
-}
-
-/**
- * Ensures `rg` is available, or throws.
- */
-export async function ensureRgPath(): Promise<string> {
-  const binPath = await getRipgrepPath();
-  if (binPath !== null) {
-    return binPath;
-  }
-  throw new Error(`Cannot find bundled ripgrep binary.`);
-}
 
 /**
  * Parameters for the GrepTool
@@ -498,7 +428,10 @@ class GrepToolInvocation extends BaseToolInvocation<
 
     const results: GrepMatch[] = [];
     try {
-      const rgPath = await ensureRgPath();
+      const rgPath = await this.config.ripgrepService.getRipgrepPath();
+      if (!rgPath) {
+        throw new Error('Cannot find bundled ripgrep binary.');
+      }
       const generator = execStreaming(rgPath, rgArgs, {
         signal: options.signal,
         allowedExitCodes: [0, 1],

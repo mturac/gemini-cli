@@ -5,14 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import {
-  canUseRipgrep,
-  RipGrepTool,
-  ensureRgPath,
-  type RipGrepToolParams,
-  getRipgrepPath,
-  __resetRipgrepPathCache,
-} from './ripGrep.js';
+import { RipGrepTool, type RipGrepToolParams } from './ripGrep.js';
 import type { GrepResult } from './tools.js';
 import path from 'node:path';
 import { isSubpath } from '../utils/paths.js';
@@ -25,25 +18,6 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { PassThrough, Readable } from 'node:stream';
 import EventEmitter from 'node:events';
 import { createMockMessageBus } from '../test-utils/mock-message-bus.js';
-import { fileExists } from '../utils/fileUtils.js';
-import { resolveExecutable } from '../utils/shell-utils.js';
-
-vi.mock('../utils/fileUtils.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../utils/fileUtils.js')>();
-  return {
-    ...actual,
-    fileExists: vi.fn(),
-  };
-});
-
-vi.mock('../utils/shell-utils.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/shell-utils.js')>();
-  return {
-    ...actual,
-    resolveExecutable: vi.fn(),
-  };
-});
 
 // Mock child_process for ripgrep calls
 vi.mock('child_process', () => ({
@@ -53,40 +27,7 @@ vi.mock('child_process', () => ({
 const mockSpawn = vi.mocked(spawn);
 
 beforeEach(() => {
-  __resetRipgrepPathCache();
-  vi.mocked(fileExists).mockReset().mockResolvedValue(true);
-  vi.mocked(resolveExecutable).mockReset().mockResolvedValue('/usr/bin/rg');
-});
-
-describe('canUseRipgrep', () => {
-  it('should return true if ripgrep already exists', async () => {
-    vi.mocked(fileExists).mockResolvedValue(true);
-    const result = await canUseRipgrep();
-    expect(result).toBe(true);
-  });
-
-  it('should return false if file does not exist', async () => {
-    vi.mocked(fileExists).mockResolvedValue(false);
-    vi.mocked(resolveExecutable).mockResolvedValue(undefined);
-    const result = await canUseRipgrep();
-    expect(result).toBe(false);
-  });
-});
-
-describe('ensureRgPath', () => {
-  it('should return rg path if ripgrep already exists', async () => {
-    vi.mocked(fileExists).mockResolvedValue(true);
-    const rgPath = await ensureRgPath();
-    expect(rgPath).toBe(await getRipgrepPath());
-  });
-
-  it('should throw an error if ripgrep cannot be used', async () => {
-    vi.mocked(fileExists).mockResolvedValue(false);
-    vi.mocked(resolveExecutable).mockResolvedValue(undefined);
-    await expect(ensureRgPath()).rejects.toThrow(
-      /Cannot find bundled ripgrep binary/,
-    );
-  });
+  vi.resetAllMocks();
 });
 
 // Helper function to create mock spawn implementations
@@ -133,62 +74,68 @@ function createMockSpawn(
   };
 }
 
+// Helper function to create a mock Config
+function createMockConfig(
+  rootDir: string,
+  workspaceDirs: string[] = [rootDir],
+) {
+  const config = {
+    getTargetDir: () => rootDir,
+    getWorkspaceContext: () =>
+      createMockWorkspaceContext(rootDir, workspaceDirs),
+    getDebugMode: () => false,
+    getFileFilteringOptions: () => ({
+      respectGitIgnore: true,
+      respectGeminiIgnore: true,
+      customIgnoreFilePaths: [],
+    }),
+    getFileFilteringRespectGitIgnore(this: Config) {
+      return this.getFileFilteringOptions().respectGitIgnore;
+    },
+    getFileFilteringRespectGeminiIgnore(this: Config) {
+      return this.getFileFilteringOptions().respectGeminiIgnore;
+    },
+    storage: {
+      getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
+    },
+    isPathAllowed(this: Config, absolutePath: string): boolean {
+      const workspaceContext = this.getWorkspaceContext();
+      if (workspaceContext.isPathWithinWorkspace(absolutePath)) {
+        return true;
+      }
+
+      const projectTempDir = this.storage.getProjectTempDir();
+      return isSubpath(path.resolve(projectTempDir), absolutePath);
+    },
+    validatePathAccess(this: Config, absolutePath: string): string | null {
+      if (this.isPathAllowed(absolutePath)) {
+        return null;
+      }
+
+      const workspaceDirs = this.getWorkspaceContext().getDirectories();
+      const projectTempDir = this.storage.getProjectTempDir();
+      return `Path not in workspace: Attempted path "${absolutePath}" resolves outside the allowed workspace directories: ${workspaceDirs.join(', ')} or the project temp directory: ${projectTempDir}`;
+    },
+    ripgrepService: {
+      getRipgrepPath: vi.fn().mockResolvedValue('/mock/rg'),
+    },
+  } as unknown as Config;
+  return config;
+}
+
 describe('RipGrepTool', () => {
   let tempRootDir: string;
   let grepTool: RipGrepTool;
   const abortSignal = new AbortController().signal;
 
-  let mockConfig = {
-    getTargetDir: () => tempRootDir,
-    getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
-    getDebugMode: () => false,
-    getFileFilteringRespectGitIgnore: () => true,
-    getFileFilteringRespectGeminiIgnore: () => true,
-    getFileFilteringOptions: () => ({
-      respectGitIgnore: true,
-      respectGeminiIgnore: true,
-    }),
-  } as unknown as Config;
+  let mockConfig: Config;
 
   beforeEach(async () => {
     mockSpawn.mockReset();
     mockSpawn.mockImplementation(createMockSpawn());
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
 
-    vi.mocked(fileExists).mockResolvedValue(true);
-
-    mockConfig = {
-      getTargetDir: () => tempRootDir,
-      getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
-      getDebugMode: () => false,
-      getFileFilteringRespectGitIgnore: () => true,
-      getFileFilteringRespectGeminiIgnore: () => true,
-      getFileFilteringOptions: () => ({
-        respectGitIgnore: true,
-        respectGeminiIgnore: true,
-      }),
-      storage: {
-        getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
-      },
-      isPathAllowed(this: Config, absolutePath: string): boolean {
-        const workspaceContext = this.getWorkspaceContext();
-        if (workspaceContext.isPathWithinWorkspace(absolutePath)) {
-          return true;
-        }
-
-        const projectTempDir = this.storage.getProjectTempDir();
-        return isSubpath(path.resolve(projectTempDir), absolutePath);
-      },
-      validatePathAccess(this: Config, absolutePath: string): string | null {
-        if (this.isPathAllowed(absolutePath)) {
-          return null;
-        }
-
-        const workspaceDirs = this.getWorkspaceContext().getDirectories();
-        const projectTempDir = this.storage.getProjectTempDir();
-        return `Path not in workspace: Attempted path "${absolutePath}" resolves outside the allowed workspace directories: ${workspaceDirs.join(', ')} or the project temp directory: ${projectTempDir}`;
-      },
-    } as unknown as Config;
+    mockConfig = createMockConfig(tempRootDir);
 
     grepTool = new RipGrepTool(mockConfig, createMockMessageBus());
 
@@ -710,8 +657,9 @@ describe('RipGrepTool', () => {
     });
 
     it('should throw an error if ripgrep is not available', async () => {
-      vi.mocked(fileExists).mockResolvedValue(false);
-      vi.mocked(resolveExecutable).mockResolvedValue(undefined);
+      vi.mocked(mockConfig.ripgrepService.getRipgrepPath).mockResolvedValue(
+        null,
+      );
 
       const params: RipGrepToolParams = { pattern: 'world' };
       const invocation = grepTool.build(params);
@@ -720,7 +668,9 @@ describe('RipGrepTool', () => {
       expect(result.llmContent).toContain('Cannot find bundled ripgrep binary');
 
       // restore the mock for subsequent tests
-      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(mockConfig.ripgrepService.getRipgrepPath).mockResolvedValue(
+        '/mock/rg',
+      );
     });
   });
 
@@ -740,39 +690,7 @@ describe('RipGrepTool', () => {
       );
 
       // Create a mock config with multiple directories
-      const multiDirConfig = {
-        getTargetDir: () => tempRootDir,
-        getWorkspaceContext: () =>
-          createMockWorkspaceContext(tempRootDir, [secondDir]),
-        getDebugMode: () => false,
-        getFileFilteringRespectGitIgnore: () => true,
-        getFileFilteringRespectGeminiIgnore: () => true,
-        getFileFilteringOptions: () => ({
-          respectGitIgnore: true,
-          respectGeminiIgnore: true,
-        }),
-        storage: {
-          getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
-        },
-        isPathAllowed(this: Config, absolutePath: string): boolean {
-          const workspaceContext = this.getWorkspaceContext();
-          if (workspaceContext.isPathWithinWorkspace(absolutePath)) {
-            return true;
-          }
-
-          const projectTempDir = this.storage.getProjectTempDir();
-          return isSubpath(path.resolve(projectTempDir), absolutePath);
-        },
-        validatePathAccess(this: Config, absolutePath: string): string | null {
-          if (this.isPathAllowed(absolutePath)) {
-            return null;
-          }
-
-          const workspaceDirs = this.getWorkspaceContext().getDirectories();
-          const projectTempDir = this.storage.getProjectTempDir();
-          return `Path not in workspace: Attempted path "${absolutePath}" resolves outside the allowed workspace directories: ${workspaceDirs.join(', ')} or the project temp directory: ${projectTempDir}`;
-        },
-      } as unknown as Config;
+      const multiDirConfig = createMockConfig(tempRootDir, [secondDir]);
 
       // Setup specific mock for this test - multi-directory search for 'world'
       // Mock will be called twice - once for each directory
@@ -853,39 +771,7 @@ describe('RipGrepTool', () => {
       );
 
       // Create a mock config with multiple directories
-      const multiDirConfig = {
-        getTargetDir: () => tempRootDir,
-        getWorkspaceContext: () =>
-          createMockWorkspaceContext(tempRootDir, [secondDir]),
-        getDebugMode: () => false,
-        getFileFilteringRespectGitIgnore: () => true,
-        getFileFilteringRespectGeminiIgnore: () => true,
-        getFileFilteringOptions: () => ({
-          respectGitIgnore: true,
-          respectGeminiIgnore: true,
-        }),
-        storage: {
-          getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
-        },
-        isPathAllowed(this: Config, absolutePath: string): boolean {
-          const workspaceContext = this.getWorkspaceContext();
-          if (workspaceContext.isPathWithinWorkspace(absolutePath)) {
-            return true;
-          }
-
-          const projectTempDir = this.storage.getProjectTempDir();
-          return isSubpath(path.resolve(projectTempDir), absolutePath);
-        },
-        validatePathAccess(this: Config, absolutePath: string): string | null {
-          if (this.isPathAllowed(absolutePath)) {
-            return null;
-          }
-
-          const workspaceDirs = this.getWorkspaceContext().getDirectories();
-          const projectTempDir = this.storage.getProjectTempDir();
-          return `Path not in workspace: Attempted path "${absolutePath}" resolves outside the allowed workspace directories: ${workspaceDirs.join(', ')} or the project temp directory: ${projectTempDir}`;
-        },
-      } as unknown as Config;
+      const multiDirConfig = createMockConfig(tempRootDir, [secondDir]);
 
       // Setup specific mock for this test - searching in 'sub' should only return matches from that directory
       mockSpawn.mockImplementation(
@@ -1400,38 +1286,15 @@ describe('RipGrepTool', () => {
     });
 
     it('should disable gitignore rules when respectGitIgnore is false', async () => {
-      const configWithoutGitIgnore = {
-        getTargetDir: () => tempRootDir,
-        getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
-        getDebugMode: () => false,
-        getFileFilteringRespectGitIgnore: () => false,
-        getFileFilteringRespectGeminiIgnore: () => true,
-        getFileFilteringOptions: () => ({
-          respectGitIgnore: false,
-          respectGeminiIgnore: true,
-        }),
-        storage: {
-          getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
-        },
-        isPathAllowed(this: Config, absolutePath: string): boolean {
-          const workspaceContext = this.getWorkspaceContext();
-          if (workspaceContext.isPathWithinWorkspace(absolutePath)) {
-            return true;
-          }
-
-          const projectTempDir = this.storage.getProjectTempDir();
-          return isSubpath(path.resolve(projectTempDir), absolutePath);
-        },
-        validatePathAccess(this: Config, absolutePath: string): string | null {
-          if (this.isPathAllowed(absolutePath)) {
-            return null;
-          }
-
-          const workspaceDirs = this.getWorkspaceContext().getDirectories();
-          const projectTempDir = this.storage.getProjectTempDir();
-          return `Path not in workspace: Attempted path "${absolutePath}" resolves outside the allowed workspace directories: ${workspaceDirs.join(', ')} or the project temp directory: ${projectTempDir}`;
-        },
-      } as unknown as Config;
+      const configWithoutGitIgnore = createMockConfig(tempRootDir);
+      vi.spyOn(
+        configWithoutGitIgnore,
+        'getFileFilteringOptions',
+      ).mockReturnValue({
+        respectGitIgnore: false,
+        respectGeminiIgnore: true,
+        customIgnoreFilePaths: [],
+      });
       const gitIgnoreDisabledTool = new RipGrepTool(
         configWithoutGitIgnore,
         createMockMessageBus(),
@@ -1466,38 +1329,16 @@ describe('RipGrepTool', () => {
     it('should add .geminiignore when enabled and patterns exist', async () => {
       const geminiIgnorePath = path.join(tempRootDir, GEMINI_IGNORE_FILE_NAME);
       await fs.writeFile(geminiIgnorePath, 'ignored.log');
-      const configWithGeminiIgnore = {
-        getTargetDir: () => tempRootDir,
-        getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
-        getDebugMode: () => false,
-        getFileFilteringRespectGitIgnore: () => true,
-        getFileFilteringRespectGeminiIgnore: () => true,
-        getFileFilteringOptions: () => ({
-          respectGitIgnore: true,
-          respectGeminiIgnore: true,
-        }),
-        storage: {
-          getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
-        },
-        isPathAllowed(this: Config, absolutePath: string): boolean {
-          const workspaceContext = this.getWorkspaceContext();
-          if (workspaceContext.isPathWithinWorkspace(absolutePath)) {
-            return true;
-          }
 
-          const projectTempDir = this.storage.getProjectTempDir();
-          return isSubpath(path.resolve(projectTempDir), absolutePath);
-        },
-        validatePathAccess(this: Config, absolutePath: string): string | null {
-          if (this.isPathAllowed(absolutePath)) {
-            return null;
-          }
-
-          const workspaceDirs = this.getWorkspaceContext().getDirectories();
-          const projectTempDir = this.storage.getProjectTempDir();
-          return `Path not in workspace: Attempted path "${absolutePath}" resolves outside the allowed workspace directories: ${workspaceDirs.join(', ')} or the project temp directory: ${projectTempDir}`;
-        },
-      } as unknown as Config;
+      const configWithGeminiIgnore = createMockConfig(tempRootDir);
+      vi.spyOn(
+        configWithGeminiIgnore,
+        'getFileFilteringOptions',
+      ).mockReturnValue({
+        respectGitIgnore: true,
+        respectGeminiIgnore: true,
+        customIgnoreFilePaths: [],
+      });
       const geminiIgnoreTool = new RipGrepTool(
         configWithGeminiIgnore,
         createMockMessageBus(),
@@ -1532,38 +1373,15 @@ describe('RipGrepTool', () => {
     it('should skip .geminiignore when disabled', async () => {
       const geminiIgnorePath = path.join(tempRootDir, GEMINI_IGNORE_FILE_NAME);
       await fs.writeFile(geminiIgnorePath, 'ignored.log');
-      const configWithoutGeminiIgnore = {
-        getTargetDir: () => tempRootDir,
-        getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
-        getDebugMode: () => false,
-        getFileFilteringRespectGitIgnore: () => true,
-        getFileFilteringRespectGeminiIgnore: () => false,
-        getFileFilteringOptions: () => ({
-          respectGitIgnore: true,
-          respectGeminiIgnore: false,
-        }),
-        storage: {
-          getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
-        },
-        isPathAllowed(this: Config, absolutePath: string): boolean {
-          const workspaceContext = this.getWorkspaceContext();
-          if (workspaceContext.isPathWithinWorkspace(absolutePath)) {
-            return true;
-          }
-
-          const projectTempDir = this.storage.getProjectTempDir();
-          return isSubpath(path.resolve(projectTempDir), absolutePath);
-        },
-        validatePathAccess(this: Config, absolutePath: string): string | null {
-          if (this.isPathAllowed(absolutePath)) {
-            return null;
-          }
-
-          const workspaceDirs = this.getWorkspaceContext().getDirectories();
-          const projectTempDir = this.storage.getProjectTempDir();
-          return `Path not in workspace: Attempted path "${absolutePath}" resolves outside the allowed workspace directories: ${workspaceDirs.join(', ')} or the project temp directory: ${projectTempDir}`;
-        },
-      } as unknown as Config;
+      const configWithoutGeminiIgnore = createMockConfig(tempRootDir);
+      vi.spyOn(
+        configWithoutGeminiIgnore,
+        'getFileFilteringOptions',
+      ).mockReturnValue({
+        respectGitIgnore: true,
+        respectGeminiIgnore: false,
+        customIgnoreFilePaths: [],
+      });
       const geminiIgnoreTool = new RipGrepTool(
         configWithoutGeminiIgnore,
         createMockMessageBus(),
@@ -1707,37 +1525,7 @@ describe('RipGrepTool', () => {
     });
 
     it('should use ./ when no path is specified (defaults to CWD)', () => {
-      const multiDirConfig = {
-        getTargetDir: () => tempRootDir,
-        getWorkspaceContext: () =>
-          createMockWorkspaceContext(tempRootDir, ['/another/dir']),
-        getDebugMode: () => false,
-        getFileFilteringOptions: () => ({
-          respectGitIgnore: true,
-          respectGeminiIgnore: true,
-        }),
-        storage: {
-          getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
-        },
-        isPathAllowed(this: Config, absolutePath: string): boolean {
-          const workspaceContext = this.getWorkspaceContext();
-          if (workspaceContext.isPathWithinWorkspace(absolutePath)) {
-            return true;
-          }
-
-          const projectTempDir = this.storage.getProjectTempDir();
-          return isSubpath(path.resolve(projectTempDir), absolutePath);
-        },
-        validatePathAccess(this: Config, absolutePath: string): string | null {
-          if (this.isPathAllowed(absolutePath)) {
-            return null;
-          }
-
-          const workspaceDirs = this.getWorkspaceContext().getDirectories();
-          const projectTempDir = this.storage.getProjectTempDir();
-          return `Path not in workspace: Attempted path "${absolutePath}" resolves outside the allowed workspace directories: ${workspaceDirs.join(', ')} or the project temp directory: ${projectTempDir}`;
-        },
-      } as unknown as Config;
+      const multiDirConfig = createMockConfig(tempRootDir, ['/another/dir']);
 
       const multiDirGrepTool = new RipGrepTool(
         multiDirConfig,
@@ -1953,80 +1741,6 @@ describe('RipGrepTool', () => {
       // MAX_LINE_LENGTH_TEXT_FILE is 2000. It should be truncated.
       expect(result.llmContent).toContain('... [truncated]');
       expect(result.llmContent).not.toContain(longString);
-    });
-  });
-});
-
-describe('getRipgrepPath', () => {
-  describe('OS/Architecture Resolution', () => {
-    it.each([
-      { platform: 'darwin', arch: 'arm64', expectedBin: 'rg-darwin-arm64' },
-      { platform: 'darwin', arch: 'x64', expectedBin: 'rg-darwin-x64' },
-      { platform: 'linux', arch: 'arm64', expectedBin: 'rg-linux-arm64' },
-      { platform: 'linux', arch: 'x64', expectedBin: 'rg-linux-x64' },
-      { platform: 'win32', arch: 'x64', expectedBin: 'rg-win32-x64.exe' },
-    ])(
-      'should map $platform $arch to $expectedBin',
-      async ({ platform, arch, expectedBin }) => {
-        vi.spyOn(os, 'platform').mockReturnValue(platform as NodeJS.Platform);
-        vi.spyOn(os, 'arch').mockReturnValue(arch);
-        vi.mocked(fileExists).mockImplementation(async (checkPath) =>
-          checkPath.endsWith(expectedBin),
-        );
-
-        const resolvedPath = await getRipgrepPath();
-        expect(resolvedPath).not.toBeNull();
-        expect(resolvedPath?.endsWith(expectedBin)).toBe(true);
-      },
-    );
-  });
-
-  describe('Path Fallback Logic', () => {
-    beforeEach(() => {
-      vi.spyOn(os, 'platform').mockReturnValue('linux');
-      vi.spyOn(os, 'arch').mockReturnValue('x64');
-    });
-
-    it('should resolve the SEA (flattened) path first', async () => {
-      vi.mocked(fileExists).mockImplementation(async (checkPath) =>
-        checkPath.includes(path.normalize('tools/vendor/ripgrep')),
-      );
-
-      const resolvedPath = await getRipgrepPath();
-      expect(resolvedPath).not.toBeNull();
-      expect(resolvedPath).toContain(path.normalize('tools/vendor/ripgrep'));
-    });
-
-    it('should fall back to the Dev path if SEA path is missing', async () => {
-      vi.mocked(fileExists).mockImplementation(
-        async (checkPath) =>
-          checkPath.includes(path.normalize('core/vendor/ripgrep')) &&
-          !checkPath.includes(path.join(path.sep, 'tools', path.sep)),
-      );
-
-      const resolvedPath = await getRipgrepPath();
-      expect(resolvedPath).not.toBeNull();
-      expect(resolvedPath).toContain(path.normalize('core/vendor/ripgrep'));
-      expect(resolvedPath).not.toContain(
-        path.join(path.sep, 'tools', path.sep),
-      );
-    });
-
-    it('should fall back to system PATH if both bundled paths are missing', async () => {
-      vi.mocked(fileExists).mockResolvedValue(false);
-      vi.mocked(resolveExecutable).mockResolvedValue('/usr/local/bin/rg');
-
-      const resolvedPath = await getRipgrepPath();
-      expect(resolvedPath).toBe('rg');
-      expect(resolveExecutable).toHaveBeenCalledWith('rg');
-    });
-
-    it('should return null if binary is missing from both bundled paths and system PATH', async () => {
-      vi.mocked(fileExists).mockResolvedValue(false);
-      vi.mocked(resolveExecutable).mockResolvedValue(undefined);
-
-      const resolvedPath = await getRipgrepPath();
-      expect(resolvedPath).toBeNull();
     });
   });
 });
