@@ -11,7 +11,6 @@ import {
   ensureRgPath,
   type RipGrepToolParams,
   getRipgrepPath,
-  resetRipgrepPathCache,
 } from './ripGrep.js';
 import type { GrepResult } from './tools.js';
 import path from 'node:path';
@@ -53,7 +52,6 @@ vi.mock('child_process', () => ({
 const mockSpawn = vi.mocked(spawn);
 
 beforeEach(() => {
-  resetRipgrepPathCache();
   vi.mocked(fileExists).mockReset().mockResolvedValue(true);
   vi.mocked(resolveExecutable).mockReset().mockResolvedValue('/usr/bin/rg');
 });
@@ -1958,14 +1956,6 @@ describe('RipGrepTool', () => {
 });
 
 describe('getRipgrepPath', () => {
-  beforeEach(() => {
-    resetRipgrepPathCache();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   describe('OS/Architecture Resolution', () => {
     it.each([
       { platform: 'darwin', arch: 'arm64', expectedBin: 'rg-darwin-arm64' },
