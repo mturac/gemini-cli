@@ -52,8 +52,7 @@ import { ShellTool } from '../tools/shell.js';
 import { AgentTool } from '../agents/agent-tool.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { GrepTool } from '../tools/grep.js';
-import { RipGrepTool } from '../tools/ripGrep.js';
-import { RipgrepService } from '../tools/ripgrepService.js';
+import { RipGrepTool, canUseRipgrep } from '../tools/ripGrep.js';
 import {
   logRipgrepFallback,
   logApprovalModeDuration,
@@ -121,14 +120,8 @@ vi.mock('../tools/ls');
 vi.mock('../tools/read-file');
 vi.mock('../tools/grep.js');
 vi.mock('../tools/ripGrep.js', () => ({
+  canUseRipgrep: vi.fn(),
   RipGrepTool: class MockRipGrepTool {},
-}));
-vi.mock('../tools/ripgrepService.js', () => ({
-  RipgrepService: class MockRipgrepService {
-    canUseRipgrep() {}
-    getRipgrepPath() {}
-    resetCache() {}
-  },
 }));
 vi.mock('../tools/glob');
 vi.mock('../tools/edit');
@@ -2295,9 +2288,7 @@ describe('setApprovalMode with folder trust', () => {
     });
 
     it('should register RipGrepTool when useRipgrep is true and it is available', async () => {
-      vi.spyOn(RipgrepService.prototype, 'canUseRipgrep').mockResolvedValue(
-        true,
-      );
+      vi.mocked(canUseRipgrep).mockResolvedValue(true);
       const config = new Config({ ...baseParams, useRipgrep: true });
       await config.initialize();
 
@@ -2315,9 +2306,7 @@ describe('setApprovalMode with folder trust', () => {
     });
 
     it('should register GrepTool as a fallback when useRipgrep is true but it is not available', async () => {
-      vi.spyOn(RipgrepService.prototype, 'canUseRipgrep').mockResolvedValue(
-        false,
-      );
+      vi.mocked(canUseRipgrep).mockResolvedValue(false);
       const config = new Config({ ...baseParams, useRipgrep: true });
       await config.initialize();
 
@@ -2341,9 +2330,7 @@ describe('setApprovalMode with folder trust', () => {
 
     it('should register GrepTool as a fallback when canUseRipgrep throws an error', async () => {
       const error = new Error('ripGrep check failed');
-      vi.spyOn(RipgrepService.prototype, 'canUseRipgrep').mockRejectedValue(
-        error,
-      );
+      vi.mocked(canUseRipgrep).mockRejectedValue(error);
       const config = new Config({ ...baseParams, useRipgrep: true });
       await config.initialize();
 
@@ -2379,7 +2366,7 @@ describe('setApprovalMode with folder trust', () => {
 
       expect(wasRipGrepRegistered).toBe(false);
       expect(wasGrepRegistered).toBe(true);
-      expect(RipgrepService.prototype.canUseRipgrep).not.toHaveBeenCalled();
+      expect(canUseRipgrep).not.toHaveBeenCalled();
       expect(logRipgrepFallback).not.toHaveBeenCalled();
     });
   });
