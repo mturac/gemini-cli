@@ -11,6 +11,7 @@ import {
   ensureRgPath,
   type RipGrepToolParams,
   getRipgrepPath,
+  resetRipgrepPathCache,
 } from './ripGrep.js';
 import type { GrepResult } from './tools.js';
 import path from 'node:path';
@@ -51,11 +52,13 @@ vi.mock('child_process', () => ({
 
 const mockSpawn = vi.mocked(spawn);
 
-describe('canUseRipgrep', () => {
-  beforeEach(() => {
-    vi.mocked(fileExists).mockReset();
-  });
+beforeEach(() => {
+  resetRipgrepPathCache();
+  vi.mocked(fileExists).mockReset().mockResolvedValue(true);
+  vi.mocked(resolveExecutable).mockReset().mockResolvedValue('/usr/bin/rg');
+});
 
+describe('canUseRipgrep', () => {
   it('should return true if ripgrep already exists', async () => {
     vi.mocked(fileExists).mockResolvedValue(true);
     const result = await canUseRipgrep();
@@ -64,16 +67,13 @@ describe('canUseRipgrep', () => {
 
   it('should return false if file does not exist', async () => {
     vi.mocked(fileExists).mockResolvedValue(false);
+    vi.mocked(resolveExecutable).mockResolvedValue(undefined);
     const result = await canUseRipgrep();
     expect(result).toBe(false);
   });
 });
 
 describe('ensureRgPath', () => {
-  beforeEach(() => {
-    vi.mocked(fileExists).mockReset();
-  });
-
   it('should return rg path if ripgrep already exists', async () => {
     vi.mocked(fileExists).mockResolvedValue(true);
     const rgPath = await ensureRgPath();
@@ -82,6 +82,7 @@ describe('ensureRgPath', () => {
 
   it('should throw an error if ripgrep cannot be used', async () => {
     vi.mocked(fileExists).mockResolvedValue(false);
+    vi.mocked(resolveExecutable).mockResolvedValue(undefined);
     await expect(ensureRgPath()).rejects.toThrow(
       /Cannot find bundled ripgrep binary/,
     );
@@ -710,6 +711,7 @@ describe('RipGrepTool', () => {
 
     it('should throw an error if ripgrep is not available', async () => {
       vi.mocked(fileExists).mockResolvedValue(false);
+      vi.mocked(resolveExecutable).mockResolvedValue(undefined);
 
       const params: RipGrepToolParams = { pattern: 'world' };
       const invocation = grepTool.build(params);
@@ -1956,6 +1958,10 @@ describe('RipGrepTool', () => {
 });
 
 describe('getRipgrepPath', () => {
+  beforeEach(() => {
+    resetRipgrepPathCache();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -2019,7 +2025,7 @@ describe('getRipgrepPath', () => {
       vi.mocked(resolveExecutable).mockResolvedValue('/usr/local/bin/rg');
 
       const resolvedPath = await getRipgrepPath();
-      expect(resolvedPath).toBe('/usr/local/bin/rg');
+      expect(resolvedPath).toBe('rg');
       expect(resolveExecutable).toHaveBeenCalledWith('rg');
     });
 

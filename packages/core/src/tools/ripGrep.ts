@@ -41,7 +41,13 @@ import { type GrepMatch, formatGrepResults } from './grep-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+let cachedRgPath: string | null | undefined = undefined;
+
 export async function getRipgrepPath(): Promise<string | null> {
+  if (cachedRgPath !== undefined) {
+    return cachedRgPath;
+  }
+
   const platform = os.platform();
   const arch = os.arch();
 
@@ -57,6 +63,7 @@ export async function getRipgrepPath(): Promise<string | null> {
 
   for (const candidate of candidatePaths) {
     if (await fileExists(candidate)) {
+      cachedRgPath = candidate;
       return candidate;
     }
   }
@@ -64,10 +71,19 @@ export async function getRipgrepPath(): Promise<string | null> {
   // 3. Fallback: check system PATH
   const systemRg = await resolveExecutable('rg');
   if (systemRg) {
-    return systemRg;
+    cachedRgPath = 'rg';
+    return 'rg';
   }
 
+  cachedRgPath = null;
   return null;
+}
+
+/**
+ * Resets the cached ripgrep path. Used for testing.
+ */
+export function resetRipgrepPathCache(): void {
+  cachedRgPath = undefined;
 }
 
 /**
